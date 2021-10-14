@@ -1,0 +1,128 @@
+Import/Export Oracle
+Exports
+Create a directory on the filesystem, e.g., /home/genesys/dbexports
+Make directory world read/write: chmod 777 /home/genesys/dbexports
+
+Create directory object in Oracle: create or replace directory dbexports as ‘/home/genesys/dbexports’
+
+grant permissions to user of schema: grant read,write on directory dbexports to gsys_cfg; commit;
+
+expdp gsys_cfg/genesys123@xe version=11.2 schemas=GSYS_CFG dumpfile=GSYS_CFG.dmp logfile=expdpGSYS_CFG.log
+
+Imports
+
+Remember to verify all users have been created prior to importing otherwise errors will occur when granting permissions on tables.
+
+Place .dmp & .log files in  /u01/app/oracle/admin/XE/dpdump directory
+    Change permissions of file to oracle:dba - chown oracle:dba *.dmp *.log
+
+impdp gsys_gax/genesys123@xe schemas=GSYS_GAX dumpfile=GSYS_GAX.dmp logfile=expdpGSYS_GAX.log
+
+- Possibly need to use REMAP_SCHEMA=SOURCE_SCHEMA:DEST_SCHEMA, e.g.:
+- impdp CONFIGDB/CgvW0ocnszoN@xe schemas=CONFIGDB dumpfile=export_CONFIGDB.dmp *REMAP_TABLESPACE=CONFIGDB:USERS*
+- EXLUDE=GRANTS
+
+
+20210803:
+impdp genesys/genesys123@xe \
+dumpfile=EXPDP_UK_PROD_CFGDB_PERF_MASK1_20APR2021.dmp \
+logfile=EXPDP_UK_PROD_CFGDB_PERF_MASK1_20APR2021.log \
+full=n \
+EXCLUDE=GRANT \
+REMAP_TABLESPACE=CFGDB_PERF:USERS \
+REMAP_TABLESPACE=DOS_8_NORES:USERS \
+REMAP_TABLESPACE=USER_DATA:USERS \
+REMAP_TABLESPACE=GENESYSCFG:USERS \
+REMAP_SCHEMA=UK_PROD_CFGDB_PERF_MASK1:GENESYS
+
+**TASKS AFTER IMPORT**
+*For <that bank customer> Only:*
+Reset 'default' user to standard settings:
+```
+update cfg_person set 
+	password = '19A88570E28E27B2EE1B69FC8A14DB73FA0AA134796D547921E6FF3B6640F2B2', 
+	salted_string = 'F95E17BEB926C29B53558D1E922F19122A5690E270DDA8C7EB2E436717405489A9ADA4EF62D5E4EA',
+	user_name = 'default',
+	EMPLOYEE_ID = '0',
+	last_name = 'default',
+	first_name = 'default'
+where dbid = 100;
+```
+
+**Updating Person Names**
+<that bank customer> helpfully rename all users to 'Mickey Mouse', which causes thousands of uniqueness violation errors in Config Server.
+Something like this can help:
+```
+SET SERVEROUTPUT ON;
+DECLARE
+	CURSOR c_person IS
+		SELECT dbid, last_name, first_name, employee_id, user_name
+		FROM CFG_PERSON cp
+		WHERE dbid >100;
+	CURR Integer;
+BEGIN
+	CURR := 1000;
+	FOR r_person IN c_person
+	LOOP
+		DBMS_OUTPUT.PUT_LINE('Current val: '||CURR||': DBID: '||r_person.dbid );
+		UPDATE CFG_PERSON
+		SET last_name = 'lname'||CURR,
+			first_name = 'fname'||CURR,
+			EMPLOYEE_ID  = 'emp'||CURR,
+			USER_NAME = 'usr'||CURR
+		WHERE dbid = r_person.dbid;
+		CURR := CURR+1;
+	END LOOP;
+
+	COMMIT;
+	EXCEPTION
+		WHEN OTHERS THEN
+			dbms_output.put_line('Error code: ' || SQLCODE);
+			dbms_output.put_line('Error mess: ' || SQLERRM);
+			RAISE;
+END;
+/
+```
+	
+**Setting up Config Server**
+Customer's with confserv renamed from default:
+confserv.conf will have renamed section [new-confserv-name]
+Make sure you start confserv with:
+`confserv -c confserv.conf -s new-confserv-name`
+Otherwise config server will not find the section and use default values.	
+Example `confserv.conf` file:
+```
+[Core_ConfServ_P]
+port = 2020
+management-port = 2021
+server = dbserver
+encryption = false
+encoding = utf-8
+langid = 1033
+multi-languages = true
+allow-empty-password = true
+allow-external-empty-password = true
+allow-mixed-encoding = true
+
+[log]
+verbose = all
+all = /var/log/genesys/confserv-hsbc, stdout
+segment = 10000
+expire = 5
+
+[dbserver]
+dbengine = oracle
+dbserver = XE
+dbname = <required_except_for_oracle>
+username = gsyshsbc
+password = genesys123
+response-timeout = 600
+```
+**Avoid Host & SCS Errors**
+Create a host in CME with your new hostname
+Assign this host to Config Server
+Remove backup Config Server from Primary Config Server config
+Set LCAPORT = 0
+
+
+
